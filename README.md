@@ -60,4 +60,4 @@ Where "*" is whatever text you want to put there.
 	AWS_SECRET_KEY=WXY123
 	SSH_CMD=C:\Utilities\Mobatek\MobaXterm\MobaXterm.exe -newtab "ssh %NAME%@%DNS_NAME% -p 22 -i %SSH_FILE%"
 
-**Note:** I use 4 backslashes in my SSH_FILE entry because that is what [MobaXterm](http://mobaxterm.mobatek.net/), the free tool that I use to connect my ec2 machines.  I used putty or kitty before, but I like MobaXterm.
+**Note:** I use 4 backslashes in my SSH_FILE entry because that is what [MobaXterm](http://mobaxterm.mobatek.net/) wants, the free tool that I use to connect my ec2 machines.  I used putty or kitty before, but I like MobaXterm.
