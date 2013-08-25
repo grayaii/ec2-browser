@@ -3,6 +3,8 @@
 
 This is a python script that allows you to browse, connect, search, terminate your ec2 instances across multiple accounts.
 
+![screenshot](https://raw.github.com/grayaii/ec2-browser/master/ec2_gui.png)
+
 ### How to Use ###
 You can either run it with python or with pythonw (if you run it with python, you'll see all the print statements, which can be helpful in debugging):
     
