@@ -1,9 +1,16 @@
-import wx
+import sys
+try:
+    import wx
+except ImportError:
+    print 'Looks like you do not have wx installed.'
+    print 'You can install it here (you want the unicode version):'
+    print 'http://www.wxpython.org/download.php'
+    print 'Your python version: ' + str(sys.version_info[0:2])
+    sys.exit(1)
 import wxPython.wx
 import wx.grid as gridlib
 import os
 import ConfigParser
-import sys
 import logging
 import copy
 import ast
@@ -11,7 +18,16 @@ import datetime
 import time
 import subprocess
 
-import boto.ec2
+try:
+    import import boto.ec2
+except ImportError:
+    print 'Looks like you do not have boto installed.'
+    print 'One way to install it is to follow these steps:'
+    print 'git clone https://github.com/boto/boto.git
+    print 'cd boto; sudo python setup.py install'
+    print 'Your python version: ' + str(sys.version_info[0:2])
+    sys.exit(1)
+
 from boto.ec2.connection import EC2Connection
 
 class EC2_Functionality():
