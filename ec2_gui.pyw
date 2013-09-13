@@ -1,10 +1,17 @@
-import wx
+import sys
+try:
+    import wx
+except ImportError:
+    print 'Looks like you do not have wx installed.'
+    print 'You can install it here (you want the unicode version):'
+    print 'http://www.wxpython.org/download.php'
+    print 'Your python version: ' + str(sys.version_info[0:2])
+    sys.exit(1)
 import wxPython.wx
 import wx.grid as gridlib
 import wx.lib.scrolledpanel as scrolled
 import os
 import ConfigParser
-import sys
 import logging
 import copy
 import ast
