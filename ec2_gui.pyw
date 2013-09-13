@@ -1,6 +1,7 @@
 import wx
 import wxPython.wx
 import wx.grid as gridlib
+import wx.lib.scrolledpanel as scrolled
 import os
 import ConfigParser
 import sys
@@ -10,9 +11,193 @@ import ast
 import datetime
 import time
 import subprocess
-
+import random
+import boto
 import boto.ec2
 from boto.ec2.connection import EC2Connection
+from boto.ec2.autoscale import AutoScaleConnection
+from boto.ec2.autoscale import LaunchConfiguration
+from boto.ec2.autoscale import Tag
+from boto.ec2.autoscale import AutoScalingGroup
+from boto.ec2.autoscale import ScalingPolicy
+from boto.ec2.cloudwatch import CloudWatchConnection
+from boto.ec2.cloudwatch import MetricAlarm
+
+class ASG_Functionality():
+    def __init__(self, logLevel=logging.CRITICAL, logger=None):
+        """ This class contains the functionality needed to communicate with Amazon's Auto Scaling Group.
+
+        :param logLevel: Verbosity level of this command (DEBUG|INFO|WARNING|CRITICAL).
+        :type logLevel: logging.logLevel
+        :param logger: Optionally specificy a logger. Useful for multithreading.
+        :type logger: logging logger
+
+        """
+        if logger is None:
+            #- Create the logger:
+            self.log = logging.getLogger(__name__)
+            self.log.handlers = []
+            ch = logging.StreamHandler()
+            ch.setFormatter(logging.Formatter('%(message)s'))
+            self.log.addHandler(ch)
+            self.log.setLevel(logLevel)
+            self.identityFile = None
+        else:
+            self.log = logger
+
+        #- OK, now connect to the region:
+        self.connectToRegion()
+
+    def connectToRegion(self):
+        #- Connect to us-east-1 region:
+        if 'AWS_ACCESS_KEY' in os.environ and 'AWS_SECRET_KEY' in os.environ:
+            self.conn = AutoScaleConnection(os.environ['AWS_ACCESS_KEY'], os.environ['AWS_SECRET_KEY'])
+            self.cwconn = CloudWatchConnection(os.environ['AWS_ACCESS_KEY'], os.environ['AWS_SECRET_KEY'])
+        else:
+            #- Maybe you can connect with the credentials in ~/.boto
+            self.conn = AutoScaleConnection()
+            self.cwconn = CloudWatchConnection()
+
+    def printAllASGs(self, logger=None):
+        if logger is None:
+            logger = self.log
+        all_asgs = self.safeFunc(self.conn.get_all_groups)
+        if len(all_asgs) == 0:
+            return 'No ASGs could be located!'
+        else:
+            retText = ''
+            for asg in all_asgs:
+                retText = retText + '\n' + self.prettyPrintAsg(asg)
+            return retText
+
+    def prettyPrintAsg(self, asgObj, logger=None):
+        """ This function prints out vital information of an ASG object.
+
+        :param asgObj: boto ASG object.
+        :type asgObj: string
+        :param logger: Optionally specificy a logger. Useful for multithreading.
+        :type logger: logging logger
+
+        """
+        if logger is None:
+            logger = self.log
+
+        retText = ''
+        #- General Information on ASG:
+        data = sorted([[i[0], str(i[1]).strip()] for i in vars(asgObj).items()])
+        for el in self.safeFunc(self.conn.get_all_activities, asgObj):
+            data.append(['Activity:', str(el.description)])
+
+        #- Print Launch Configuration Info:
+        data.append(['launch configurations:', ''])
+        for el in self.safeFunc(self.conn.get_all_launch_configurations, names=[str(asgObj.launch_config_name)]):
+            data.append(['\t----------Launch Description', ''])
+            data = data + sorted([['\t' + i[0], str(i[1]).strip()] for i in vars(el).items()])
+
+        #- Print Scaling Policies Info:
+        scalingPolicies = self.safeFunc(self.conn.get_all_policies, as_group=asgObj.name)
+        data.append(['scaling policies:', ''])
+        for policy in scalingPolicies:
+            data.append(['\t---------Scaling Policy Description', ''])
+            data = data + sorted([['\t' + i[0], str(i[1]).strip()] for i in vars(policy).items()])
+            #- Print Alarms:
+            data.append(['\talarms:', str(policy.alarms)])
+            for alarm in policy.alarms:
+                data.append(['\t\t----------Alarm Description', ''])
+                data = data + sorted([['\t\t' + i[0], str(i[1]).strip()] for i in vars(alarm).items()])
+                for cw_alarm in self.safeFunc(self.cwconn.describe_alarms, alarm_names=[alarm.name]):
+                    data = data + sorted([['\t\t' + i[0], str(i[1]).strip()] for i in vars(cw_alarm).items()])
+ 
+        retText = retText + '\n--------------------------------\n'
+        retText = retText + '-------------- ASG -------------\n'
+        retText = retText + '--------------------------------\n'
+        retText = retText + self.prettyPrintColumns(data)
+        return retText
+
+    def prettyPrintColumns(self, data, padding=None):
+        """ This funciton returns a user friendly column output string.
+
+        :param data: A list of strings.
+        :type data: list of strings
+        :param padding: The number of spaces between columns Default is 2.
+        :type padding: int
+        :return: text
+
+        Example (output of _sectionPrint)::
+
+            data = [['a', 'b', 'c'], ['aaaaaaaaaa', 'b', 'c'], ['a', 'bbbbbbbbbb', 'c']]
+            print prettyPrintColumns(data)
+            a           b           c
+            aaaaaaaaaa  b           c
+            a           bbbbbbbbbb  c
+
+        """
+        if len(data) == 0:
+            return ""
+
+        padding = 2 if padding is None else padding
+
+        #- Invert roles to columns:
+        dataPrime = zip(*data)
+
+        #- Calculate the max column width for each column:
+        column_widths = []
+        for i in range(0, len(data[0])):
+            column_widths.append(len(max(dataPrime[i], key=len)) + padding)
+
+        #- Modify the data directly with padding:
+        for i in range(0, len(data)):
+            for ii in range(0, len(column_widths) - 1):
+                data[i][ii] = data[i][ii].ljust(column_widths[ii])
+        retStr = ''
+        for row in data:
+            retStr = retStr + "".join(word for word in row) + '\n'
+
+        return retStr
+
+    def safeFunc(self, func, *args, **kwargs):
+        logger = self.log
+        if 'logger' in kwargs:
+            logger = kwargs['logger']
+            del kwargs['logger']
+        attempts = 60
+        retVal = None
+        done_waiting_string = 'Done Waiting. Raising Exception.'
+        while True:
+            sleeptime = random.random() * 3
+            try:
+                retVal = func(*args, **kwargs)
+            except Exception as ex:
+                if not hasattr(ex, 'error_code'):
+                    raise
+                if ex.error_code == "AlreadyExists":
+                    attempts = attempts - 1
+                    logger.critical(ex.error_message + " " + str(sleeptime * 30) + " seconds), try again " + str(attempts) + " times...")
+                    if attempts == 0:
+                        logger.critical(done_waiting_string)
+                        raise ex
+                    time.sleep(sleeptime * 30)
+                elif ex.error_code == "Throttling":
+                    attempts = attempts - 1
+                    logger.critical(ex.error_message + " " + str(sleeptime * 30) + " seconds), try again " + str(attempts) + " times...")
+                    if attempts == 0:
+                        logger.critical(done_waiting_string)
+                        raise ex
+                    time.sleep(sleeptime)
+                elif ex.error_code == "ValidationError":
+                    attempts = attempts - 1
+                    logger.critical(ex.error_message + " " + str(sleeptime * 30) + " seconds), try again " + str(attempts) + " times...")
+                    if attempts == 0:
+                        logger.critical(done_waiting_string)
+                        raise ex
+                    time.sleep(sleeptime * 30)
+                else:
+                    for i, j in vars(ex).items():
+                        logger.critical(i + " === " + str(j))
+                    raise
+            else:
+                break
+        return retVal
 
 class EC2_Functionality():
     def __init__(self, logLevel=logging.CRITICAL, logger=None):
@@ -95,7 +280,6 @@ class EC2_Functionality():
         """
         return [i for r in self.conn.get_all_instances() for i in r.instances]
 
-
     def terminateInstanceById(self, instanceId, logger=None):
         """ This function terminates an instance by it's AWS ID.
 
@@ -121,10 +305,23 @@ class EC2_Functionality():
                 time.sleep(10)
         logger.critical('Instance ' + instanceId + ' is terminated or is terminating!')
 
+class AsgInfoDialog(scrolled.ScrolledPanel):
+    def __init__(self, parent):
+        scrolled.ScrolledPanel.__init__(self, parent, -1)
+        vbox = wx.BoxSizer(wx.VERTICAL)
+        asgObj = ASG_Functionality(logger=None)
+        tText = asgObj.printAllASGs()
+        font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        desc = wx.StaticText(self, -1, tText)
+        desc.SetForegroundColour("Blue")
+        desc.SetFont(font)
+        vbox.Add(desc, 0, wx.ALIGN_LEFT|wx.ALL, 5)
+        self.SetSizer(vbox)
+        self.SetAutoLayout(1)
+        self.SetupScrolling()
+
 class AdditionalInfoDialog(wx.Dialog):
     def __init__ (self, parent, ID, title, instanceObj):
-        import inspect
-        print inspect.getargspec(wx.Dialog.__init__)
         wx.Dialog.__init__(self, parent=parent,
                                          pos=wx.DefaultPosition, size=(850,500),
                                          style=wx.DEFAULT_DIALOG_STYLE | wx.RESIZE_BORDER)
@@ -154,7 +351,6 @@ class AdditionalInfoDialog(wx.Dialog):
                 i = i + 1
             else:
                 bflip = False
-            #wx.StaticText(self, -1, attr, (xposKey + rcolumn, yStartOfText + i * height), style=wx.ALIGN_RIGHT)
             t = wx.TextCtrl(parent=self, id=-1, size=(135,-1), pos=(xposKey + rcolumn, yStartOfText + i * height), style=wx.TE_READONLY|wx.BORDER_NONE)
             t.SetValue(attr)
             if attr == 'instance_profile':
@@ -174,7 +370,6 @@ class AdditionalInfoDialog(wx.Dialog):
                     val = strval
             else:
                 val = str(getattr(instanceObj, attr))
-            #wx.StaticText(self, -1, str(val), (xposValue + rcolumn, yStartOfText + i * height))
             t = wx.TextCtrl(parent=self, id=-1, size=(200,-1), pos=(xposValue + rcolumn, yStartOfText + i * height), style=wx.TE_READONLY|wx.BORDER_NONE)
             t.SetValue(str(val))
 
@@ -200,7 +395,7 @@ class MyForm(wx.Frame):
         return len(str(tags_minus_name))
 
     def createDictFromIni(self):
-        configfile = os.path.join(os.path.dirname(__file__), 'ec2_gui.ini')
+        configfile = os.path.join(os.path.dirname(__file__), os.path.join('data', 'ec2_gui.ini'))
         config = ConfigParser.RawConfigParser()
         ret_sshFileDict = {}
         ret_credentialsDict = {}
@@ -221,13 +416,14 @@ class MyForm(wx.Frame):
                 ret_credentialsDict[section]['AWS_ACCESS_KEY'] = config.get(section, 'AWS_ACCESS_KEY')
                 ret_credentialsDict[section]['AWS_SECRET_KEY'] = config.get(section, 'AWS_SECRET_KEY')
                 ret_credentialsDict[section]['SSH_CMD'] = config.get(section, 'SSH_CMD')
-                
+
             for section in userSections:
                 ret_usersDict[section] = {}
                 ret_usersDict[section]['NAME'] = config.get(section, 'NAME')
                 ret_usersDict[section]['DISPLAY'] = config.get(section, 'DISPLAY')
 
         else:
+            print 'location of pom: ' + configfile
             dlg = wx.MessageDialog(None, 'Could not find ini file!' \
                                          'See README.txt for more details.', "Error", wx.OK|wx.ICON_ERROR)
             dlg.ShowModal()
@@ -250,7 +446,7 @@ class MyForm(wx.Frame):
         self.refreshEc2List()
 
         #- Initialize the window:
-        wx.Frame.__init__(self, None, wx.ID_ANY, "Grid with Popup Menu", size=(1100,300))
+        wx.Frame.__init__(self, None, wx.ID_ANY, "EC2 Browser", size=(1100,300))
 
         # Add a panel so it looks correct on all platforms
         self.panel = wx.Panel(self, wx.ID_ANY)
@@ -285,7 +481,7 @@ class MyForm(wx.Frame):
                 max_name_len = i.tags['Name']
             else:
                 max_name_len = buff
-            
+
             max_dns_name = max(self.all_instances, key=lambda x: len(x.dns_name)).dns_name
             max_tags = str(max(self.all_instances, key=self.getMaxTag).tags)
             max_id = max(self.all_instances, key=lambda x: len(x.id)).id
@@ -325,8 +521,8 @@ class MyForm(wx.Frame):
         sshFiles = [v['DISPLAY'] for k,v in self.ret_sshFileDict.items()]
         cb_sshFiles = wx.ComboBox(toolbar, value=sshFiles[0], pos=(50, 30), choices=sshFiles, style=wx.CB_READONLY)
         self.setSshFileBasedOnComboBoxSelection(sshFiles[0])
-        cb_sshFiles.Bind(wx.EVT_COMBOBOX, self.handler_onComboBoxSSHFilesSelect)        
-        
+        cb_sshFiles.Bind(wx.EVT_COMBOBOX, self.handler_onComboBoxSSHFilesSelect)
+
         #- Pull down for ssh pem/ppk files:
         userSelection = [v['DISPLAY'] for k,v in self.ret_usersDict.items()]
         cb_UserSelection = wx.ComboBox(toolbar, value=userSelection[0], pos=(50, 30), choices=userSelection, style=wx.CB_READONLY)
@@ -334,14 +530,14 @@ class MyForm(wx.Frame):
         cb_UserSelection.Bind(wx.EVT_COMBOBOX, self.handler_onComboBoxUserSelect)
 
         #- Refresh button:
-        qtool = toolbar.AddLabelTool(wx.ID_ANY, 'Refresh', wx.Bitmap(os.path.join(os.path.dirname(__file__), 'refresh.png')))
+        refreshButton = toolbar.AddLabelTool(wx.ID_ANY, 'Refresh', wx.Bitmap(os.path.join(os.path.dirname(__file__), os.path.join('data', 'refresh.png'))))
         toolbar.AddSeparator()
-        self.Bind(wx.EVT_TOOL, self.refreshButton, qtool)
+        self.Bind(wx.EVT_TOOL, self.refreshButton, refreshButton)
 
         #- Text Search:
         self.search = wx.SearchCtrl(toolbar, size=(150,-1))
         self.search.Bind(wx.EVT_TEXT, self.handler_onTextEnteredInSearchField)
-        
+
         #- Now add all widgets to toolbar:
         toolbar.AddControl(self.search)
         toolbar.AddSeparator()
@@ -350,6 +546,11 @@ class MyForm(wx.Frame):
         toolbar.AddControl(cb_sshFiles)
         toolbar.AddSeparator()
         toolbar.AddControl(cb_UserSelection)
+
+        #- Create a button that displays ASG information:
+        toolbar.AddSeparator()
+        asgButton = toolbar.AddLabelTool(wx.ID_ANY, 'ASG', wx.Bitmap(os.path.join(os.path.dirname(__file__), os.path.join('data', 'ASG.png'))))
+        self.Bind(wx.EVT_TOOL, self.displayAsgButton, asgButton)
 
         toolbar.Realize()
         sizer = wx.BoxSizer(wx.VERTICAL)
@@ -368,16 +569,16 @@ class MyForm(wx.Frame):
 
     def handler_onComboBoxUserSelect(self, e):
         self.setUserFileBasedOnComboBoxSelection(e.GetString())
-        
+
     def handler_onComboBoxSSHFilesSelect(self, e):
         self.setSshFileBasedOnComboBoxSelection(e.GetString())
 
     def setSshFileBasedOnComboBoxSelection(self, text):
         self.sshFileSelected = text
-        
+
     def setUserFileBasedOnComboBoxSelection(self, text):
         self.userSelected = text
-        
+
     def handler_onComboBoxCredentialsSelect(self, e):
         self.setCredentialsBasedOnComboBoxSelection(e.GetString())
         self.doRefreshButtonCommands()
@@ -390,7 +591,7 @@ class MyForm(wx.Frame):
     def refreshEc2List(self):
         print '------------refreshing ec2 list'
         self.g_ec2 = EC2_Functionality()
-        
+
         self.all_instances = self.g_ec2.getAllInstances()
         self.filtered_list = copy.deepcopy(self.all_instances)
         self.makeAllVisible()
@@ -398,6 +599,21 @@ class MyForm(wx.Frame):
     def refreshButton(self, event):
         #- When you click on the refresh button, this code gets executed:
         self.doRefreshButtonCommands()
+
+    def displayAsgButton(self, event):
+        frame = wx.Frame(None, wx.ID_ANY)
+        fa = AsgInfoDialog(frame)
+        frame.Show()
+        #frame = AsgInfoDialog(None, -1, 'Aliens')
+        #frame.Show(True)
+        #frame.Centre()
+        #dlg = AsgInfoDialog(parent=None, ID=0, title="Info", instanceObj=self.filtered_list[self.selected_row])
+        #dlg.ShowModal()
+        #dlg.Destroy()
+        #dlg = wxPython.lib.dialogs.wxScrolledMessageDialog(self, 'msg', 'title', size=(1200,300))
+        #dlg.ShowModal() 
+        #dlg.Destroy()
+        
 
     def doRefreshButtonCommands(self):
         self.refreshEc2List()
@@ -410,7 +626,12 @@ class MyForm(wx.Frame):
         for k,v in self.columns.items():
             if v['col_id'] == evt.GetCol():
                 print 'column modified: ' + k + '. instance ID: ' + str(self.filtered_list[evt.GetRow()].id)
-                self.g_ec2.createTags(resource_ids=[str(self.filtered_list[evt.GetRow()].id)], dict_of_tags=ast.literal_eval(value))
+                #- We need to ignore the keys that start with AWS:
+                dict_of_tags = ast.literal_eval(value)
+                for key in dict_of_tags.keys():
+                    if key.startswith('aws:'):
+                        del dict_of_tags[key]
+                self.g_ec2.createTags(resource_ids=[str(self.filtered_list[evt.GetRow()].id)], dict_of_tags=dict_of_tags)
                 break
 
     def handler_onTextEnteredInSearchField(self, evt):
