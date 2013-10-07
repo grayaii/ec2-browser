@@ -19,7 +19,17 @@ import datetime
 import time
 import subprocess
 import random
-import boto
+try:
+    import boto
+except ImportError:
+    print 'Looks like you do not have boto installed.'
+    print 'You can install it like this:'
+    print '-' * 20
+    print 'git clone https://github.com/boto/boto.git'
+    print 'cd boto'
+    print 'sudo python setup.py install'
+    print '-' * 20
+    sys.exit(1)
 import boto.ec2
 from boto.ec2.connection import EC2Connection
 from boto.ec2.autoscale import AutoScaleConnection
@@ -72,7 +82,7 @@ class ASG_Functionality():
         if len(all_asgs) == 0:
             return 'No ASGs could be located!'
         else:
-            retText = ''
+            retText = 'Total Number of ASGs: ' + str(len(all_asgs)) + '\n'
             for asg in all_asgs:
                 retText = retText + '\n' + self.prettyPrintAsg(asg)
             return retText
@@ -317,16 +327,34 @@ class AsgInfoDialog(scrolled.ScrolledPanel):
         scrolled.ScrolledPanel.__init__(self, parent, -1)
         vbox = wx.BoxSizer(wx.VERTICAL)
         asgObj = ASG_Functionality(logger=None)
-        tText = asgObj.printAllASGs()
+        self.tText = asgObj.printAllASGs()
         font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
-        desc = wx.StaticText(self, -1, tText)
+        desc = wx.StaticText(self, -1, self.tText)
         desc.SetForegroundColour("Blue")
         desc.SetFont(font)
+        
+        #- Create the toolbar and all its widgets:
+        toolbar = parent.CreateToolBar()
+        x = toolbar.AddLabelTool(wx.ID_ANY, 'ASG', wx.Bitmap(os.path.join(os.path.dirname(__file__), os.path.join('data', 'copy.png'))))
+        toolbar.Realize()
+        
+        parent.Bind(wx.EVT_TOOL, self.onCopyF, x)        
+        
         vbox.Add(desc, 0, wx.ALIGN_LEFT|wx.ALL, 5)
         self.SetSizer(vbox)
         self.SetAutoLayout(1)
         self.SetupScrolling()
-
+        
+    def onCopyF(self, event):
+        print 'putting text to clipboard...'
+        self.dataObj = wx.TextDataObject()
+        self.dataObj.SetText(self.tText)
+        if wx.TheClipboard.Open():
+            wx.TheClipboard.SetData(self.dataObj)
+            wx.TheClipboard.Close()
+        else:
+            wx.MessageBox("Unable to open the clipboard", "Error")
+        
 class AdditionalInfoDialog(wx.Dialog):
     def __init__ (self, parent, ID, title, instanceObj):
         wx.Dialog.__init__(self, parent=parent,
@@ -458,7 +486,7 @@ class MyForm(wx.Frame):
         # Add a panel so it looks correct on all platforms
         self.panel = wx.Panel(self, wx.ID_ANY)
 
-        num_of_columns = 6
+        num_of_columns = 7
         self.grid = gridlib.Grid(self.panel)
         self.grid.CreateGrid(len(self.all_instances), num_of_columns)
 
@@ -502,6 +530,7 @@ class MyForm(wx.Frame):
         self.columns["ID"] = {'col_id':3, 'ins_attr':'id','col_size':dc.GetTextExtent(max_id + buff)[0]}
         self.columns["private-dns"] = {'col_id':4, 'ins_attr':'private_dns_name','col_size':dc.GetTextExtent(max_private_dns_name + buff)[0]}
         self.columns["state"] = {'col_id':5, 'ins_attr':'state','col_size':dc.GetTextExtent(max_state + buff)[0]}
+        self.columns["launchTime"] = {'col_id':6, 'ins_attr':'launch_time','col_size':dc.GetTextExtent(max_state + buff)[0]}
 
         #- Set the colors of the rows based on instance state:
         self.state_colors = {}
